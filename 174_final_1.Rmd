@@ -1,0 +1,506 @@
+---
+title: "R Programming for Time Series Analysis of Optimized Natural Gas Portfolios"
+author: "Lewis Boslego"
+date: "March 14, 2023"
+output:
+  pdf_document: default
+---
+
+
+
+```{r}
+library(tidyverse)
+library(magrittr) # double pipe
+library(forecast) # time series functions
+library(MASS) # boxcox
+library(tseries) #adf.test()
+library(gridExtra) # graphing tool
+library(knitr)
+```
+
+Import data:
+```{r}
+ng <- read_csv("174_data.csv", show_col_types = "f")
+ng %>% head()
+
+# The columns with ticker names are calender month arithmetic averages of 
+# the stocks daily adjusted close prices.
+# the columns with ticker names followed by _return are the logarithmic averages
+# of the monthly average price. Formula: Rt = Ln(Pt/Pt-1)
+# All of this data processing was done using Microsoft Excel because it is far
+# better suited for these steps. 
+
+# NOTE: Date is inaccurate, all data is end of month average. 
+# e.g. observations for June 1, 2000, actually correspond to June 30, 2000
+
+ng_train <- ng[1:282,] # data to train models, removed last 12 months.
+ng_test <- ng[283:294,] # only most recent 12 months of data to test forecasts.
+```
+
+
+
+---
+Generating Equal Weights (EW):
+```{r}
+portfolio <- ng_train 
+portfolio %<>% mutate(equal_port_price = .2*EQT + .2*DVN + 
+                                         .2*LNG + .2*EPD + 
+                                         .2*SRE, 
+                      equal_port_return = .2*EQT_return + .2*DVN_return + 
+                                          .2*LNG_return + .2*EPD_return + 
+                                          .2*SRE_return) 
+```
+
+Generating Global Minimum Variance (GMV):
+```{r}
+cov_mtx <- portfolio %>% 
+           dplyr::select(EQT_return, DVN_return, 
+                         LNG_return, EPD_return, 
+                         SRE_return)  %>%  cov()
+
+gmv_cov_mtx <- rbind(2*cov_mtx, c(1, 1, 1, 1, 1))
+gmv_cov_mtx %<>% cbind(c(1, 1, 1, 1, 1, 0))
+b <- c(0, 0, 0, 0, 0, 1)
+
+w <- solve(gmv_cov_mtx)%*%b
+w_vec <- w[1:5, 1]
+w_vec # Global Minimum Variance weights
+
+portfolio %<>% mutate(mv_port_price = 
+                       0.1703922*EQT + -0.1111337*DVN + 
+                      -0.0194195*LNG +  0.4235468*EPD +
+                       0.5366141*SRE,
+                       mv_port_return = 
+                        0.1703922*EQT_return + -0.1111337*DVN_return + 
+                       -0.0194195*LNG_return +  0.4235468*EPD_return + 
+                        0.5366141*SRE_return)
+```
+
+
+Maximum Sharpe Ratio (SRP):
+```{r}
+mean_return <- c(mean(ng_train$EQT_return), mean(ng_train$DVN_return),
+                 mean(ng_train$LNG_return), mean(ng_train$EPD_return),
+                 mean(ng_train$SRE_return))
+
+sd_return <- c(sd(ng_train$EQT_return), sd(ng_train$DVN_return),
+               sd(ng_train$LNG_return), sd(ng_train$EPD_return),
+               sd(ng_train$SRE_return))
+
+sigma_inv_mat <- cov_mtx %>% solve()
+one_vec <- rep(1,5)
+
+top_mat = sigma_inv_mat%*%mean_return[1:5]
+bot_val = as.numeric(t(one_vec)%*%top_mat)
+m_vec = top_mat[,1]/bot_val
+m_vec # maximum Sharpe portfolio weights
+
+portfolio %<>% mutate(sharpe_port_price = 
+                       0.134725966*EQT + -0.260390861*DVN +
+                      -0.001451409*LNG +  0.701833301*EPD + 
+                       0.425283002*SRE,
+                     sharpe_port_return = 
+                        0.134725966*EQT_return + -0.260390861*DVN_return +
+                       -0.001451409*LNG_return + 0.701833301*EPD_return + 
+                        0.425283002*SRE_return) 
+
+Sharpe = mean(portfolio$sharpe_port_return) / 
+         sd(portfolio$sharpe_port_return) # = 0.245
+```
+
+Preparing data for mean-variance graph.
+```{r}
+mean_return %<>% append(
+                      c(mean(portfolio$equal_port_return), 
+                        mean(portfolio$mv_port_return), 
+                        mean(portfolio$sharpe_port_return)))
+
+sd_return %<>% append(
+                    c(sd(portfolio$equal_port_return), 
+                      sd(portfolio$mv_port_return), 
+                      sd(portfolio$sharpe_port_return)))
+               
+names <- c('EQT','DVN','LNG', 'EPD', 'SRE', 'EW', 'GMV', 'SRP')
+# EW is equal weights, GMV is global minimum variance, SRP is maximum Sharpe 
+# ratio.
+
+mean_sd <- cbind(names, mean_return, sd_return) %>% 
+           as_tibble() %>% 
+           mutate(mean_return = as.numeric(mean_return), 
+                    sd_return = as.numeric(sd_return))
+```
+
+
+Calculating the portfolios for the testing data set
+```{r, include=F}
+portfolio_test <- ng_test %>% mutate(
+                      equal_port_return = 
+                          .2*EQT_return + .2*DVN_return + 
+                          .2*LNG_return + .2*EPD_return + 
+                          .2*SRE_return,
+                       mv_port_return = 
+                 0.1703922*EQT_return + -0.1111337*DVN_return + 
+                -0.0194195*LNG_return +  0.4235468*EPD_return + 
+                 0.5366141*SRE_return,
+                 sharpe_port_return = 
+             0.134725966*EQT_return + -0.260390861*DVN_return +
+            -0.001451409*LNG_return + 0.701833301*EPD_return + 
+             0.425283002*SRE_return)
+
+portfolio_full <- ng %>% mutate(
+                      equal_port_return = 
+                          .2*EQT_return + .2*DVN_return + 
+                          .2*LNG_return + .2*EPD_return + 
+                          .2*SRE_return,
+                       mv_port_return = 
+                 0.1703922*EQT_return + -0.1111337*DVN_return + 
+                -0.0194195*LNG_return +  0.4235468*EPD_return + 
+                 0.5366141*SRE_return,
+                 sharpe_port_return = 
+             0.134725966*EQT_return + -0.260390861*DVN_return +
+            -0.001451409*LNG_return + 0.701833301*EPD_return + 
+             0.425283002*SRE_return)
+```
+
+Plot of all 3 portfolios and all stocks on mean-variance plane
+```{r}
+ggplot(data = mean_sd, aes(x=sd_return, y=mean_return)) + 
+ geom_point() +
+  geom_text(aes(label = names), vjust = 1.45, color = "blue", cex = 3.5) +
+  labs(x = 'Volatility (sd)', y = 'Average Return', 
+       title = "Mean-Variance Representation of Market Basket",
+       subtitle = "Individual stocks and weighted portfolios") + 
+  theme_bw() 
+```
+
+Graph of prices
+```{r}
+par(mfrow = c(2,2))
+plot(y =ng_train$EQT, x = ng_train$date, type = "l",
+     main = "EQT", ylab = "Price",  xlab = "Date")
+plot(y = ng_train$DVN, x = ng_train$date, type = "l",
+     main = "DVN", ylab = "Price",  xlab = "Date")
+plot(y =ng_train$LNG,x = ng_train$date, type = "l",
+     main = "LNG", ylab = "Price",  xlab = "Date")
+plot(y = ng_train$EPD, x = ng_train$date, type = "l",
+     main = "EPD", ylab = "Price",  xlab = "Date")
+plot(y = ng_train$SRE, x = ng_train$date, type = "l", 
+     main = "SRE", ylab = "Price",  xlab = "Date")
+```
+
+Graph of returns
+```{r}
+par(mfrow = c(2,2))
+plot(y =ng_train$EQT_return, x = ng_train$date, type = "l",
+     main = "EQT", ylab = "Return",  xlab = "Date")
+plot(y = ng_train$DVN_return, x = ng_train$date, type = "l",
+     main = "DVN", ylab = "Return",  xlab = "Date")
+plot(y =ng_train$LNG_return,x = ng_train$date, type = "l",
+     main = "LNG", ylab = "Return",  xlab = "Date")
+plot(y = ng_train$EPD_return, x = ng_train$date, type = "l",
+     main = "EPD", ylab = "Return",  xlab = "Date")
+plot(y = ng_train$SRE_return, x = ng_train$date, type = "l", 
+     main = "SRE", ylab = "Return",  xlab = "Date")
+```
+
+
+ARIMA:
+---
+Equal weight
+---
+Price and Return plot:
+```{r}
+a1 <- ggplot(portfolio, aes(x = date, y = equal_port_price)) + geom_line() + 
+  labs(y = 'Price',x = "Date") + theme_minimal()
+b1 <- ggplot(portfolio, aes(x = date, y = equal_port_return)) + geom_line() + 
+  labs(y = 'Return', x = "Date") + theme_minimal()
+gridExtra::grid.arrange(a1, b1, top = "Equal Weight Portfolio")
+```
+
+stationary test:
+```{r}
+portfolio$equal_port_return %>% ts() %>% 
+  adf.test(alternative = "stationary") 
+# H0: non-stationary. p < .01 => reject H0.
+```
+
+
+ACF and PACF
+```{r}
+par(mfrow = c(2,1))
+acf(portfolio$equal_port_return, main = "Equal Weight Portfolio Autocorrelations")
+pacf(portfolio$equal_port_return, main = "") 
+```
+
+
+MA(1)
+```{r}
+equal_ma1 <- forecast::Arima(portfolio$equal_port_return, 
+                             order = c(0, 0, 1), method = "ML")
+summary(equal_ma1)
+```
+
+AR(1)
+```{r, echo=F}
+equal_ar1 <- forecast::Arima(portfolio$equal_port_return, 
+                             order = c(1, 0, 0), method = "ML")
+summary(equal_ar1)
+```
+
+ARMA(1,1)
+```{r}
+equal_arma11 <- forecast::Arima(portfolio$equal_port_return, 
+                             order = c(1, 0, 1), method = "ML")
+summary(equal_arma11)
+```
+
+```{r}
+checkresiduals(equal_ar1, plot = F)
+
+checkresiduals(equal_ma1, plot = F)
+
+checkresiduals(equal_arma11, plot = F)
+```
+
+Using the models to forecast:
+```{r}
+equal_ma1_forecast <- forecast::forecast(equal_ma1, h=12) 
+equal_ar1_forecast <- forecast::forecast(equal_ar1, h=12) 
+equal_arma11_forecast <- forecast::forecast(equal_arma11, h=12) 
+```
+
+```{r}
+par(mfrow = c(2,1))
+plot(equal_ma1_forecast, 
+     xlim = c(length(portfolio$equal_port_return)-36, 
+              length(portfolio$equal_port_return)+12))
+plot(equal_ar1_forecast, 
+     xlim = c(length(portfolio$equal_port_return)-36, 
+              length(portfolio$equal_port_return)+12))
+plot(equal_arma11_forecast, 
+     xlim = c(length(portfolio$equal_port_return)-36, 
+              length(portfolio$equal_port_return)+12)) 
+plot(ts(portfolio_full$equal_port_return), xlim = 
+       c(length(portfolio_full$equal_port_return)-48, 
+              length(portfolio_full$equal_port_return)),
+     main = "True Return Time Series", xlab="",ylab="")
+```
+
+
+Error statistics for forecast
+```{r}
+# accuracy of model predictions against the testing data.
+equal_ma1_accuracy <- forecast::accuracy(equal_ma1_forecast, 
+                                         ts(portfolio_full$equal_port_return))
+equal_ar1_accuracy <- forecast::accuracy(equal_ar1_forecast, 
+                                         ts(portfolio_full$equal_port_return)) 
+equal_arma11_accuracy <- forecast::accuracy(equal_arma11_forecast,
+                                          ts(portfolio_full$equal_port_return)) 
+
+
+equal_test_rmse <- c(round(equal_ma1_accuracy[2,2], digits = 5),
+               round(equal_ar1_accuracy[2,2], digits=5),
+               round(equal_arma11_accuracy[2,2], digits=5))
+equal_test_mae <- c(round(equal_ma1_accuracy[2,3], digits=5),
+               round(equal_ar1_accuracy[2,3], digits =5),
+               round(equal_arma11_accuracy[2,3], digits=5))
+equal_test_names <- c("MA(1)","AR(1)","ARMA(1,1)")
+
+equal_tests <- cbind(equal_test_names,equal_test_rmse,equal_test_mae) %>% as_data_frame()
+
+kable(
+  equal_tests %>% rename("Model" = "equal_test_names", 
+                         "RMSE" = "equal_test_rmse",
+                         "MAE" = "equal_test_mae"),
+  caption = "Model Testing Accuracy")
+```
+
+gmv:
+---
+gmv price & return plot: 
+```{r}
+a2 <- ggplot(portfolio, aes(x = date, y = mv_port_price)) + geom_line() + 
+  labs(y = 'Price',x = "Date") + theme_minimal()
+b2 <- ggplot(portfolio, aes(x = date, y = mv_port_return)) + geom_line() + 
+  labs(y = 'Return', x = "Date") + theme_minimal()
+gridExtra::grid.arrange(a2, b2, top = "Global Minimum Variance")
+```
+
+stationary test
+```{r}
+adf.test(portfolio$mv_port_return) # stationary
+```
+
+ACF & PACF gmv:
+```{r}
+acf(portfolio$mv_port_return, main = "")  
+pacf(portfolio$mv_port_return, main = "") 
+```
+
+Fitting the models
+```{r}
+gmv_ma3 <- forecast::Arima(portfolio$mv_port_return, order = c(0,0,3), method = "ML")
+summary(gmv_ma3)
+gmv_ma1 <- forecast::Arima(portfolio$mv_port_return, order = c(0,0,1), method = "ML")
+summary(gmv_ma1)
+gmv_ma0 <- forecast::Arima(portfolio$mv_port_return, order =c(0,0,0), method = "ML")
+summary(gmv_ma0)
+```
+
+Checking residuals:
+```{r}
+checkresiduals(gmv_ma3, plot = F)
+checkresiduals(gmv_ma1, plot = F)
+checkresiduals(gmv_ma0, plot = F)
+```
+
+```{r, echo = F}
+gmv_ma3_forecast <- forecast::forecast(gmv_ma3, h=12) 
+gmv_ma1_forecast <- forecast::forecast(gmv_ma1, h=12) 
+gmv_ma0_forecast <- forecast::forecast(gmv_ma0, h=12) 
+```
+
+Generating forecasts
+```{r}
+par(mfrow = c(2,1))
+plot(gmv_ma3_forecast, 
+     xlim = c(length(portfolio$mv_port_return)-36, 
+              length(portfolio$mv_port_return)+12))
+plot(gmv_ma1_forecast, 
+     xlim = c(length(portfolio$mv_port_return)-36, 
+              length(portfolio$mv_port_return)+12))
+plot(gmv_ma0_forecast, 
+     xlim = c(length(portfolio$mv_port_return)-36, 
+              length(portfolio$mv_port_return)+12)) 
+plot(ts(portfolio_full$mv_port_return), xlim = 
+       c(length(portfolio_full$mv_port_return)-48, 
+              length(portfolio_full$mv_port_return)),
+     main = "True Return Time Series", xlab="",ylab="")
+```
+
+# forecasting error
+```{r}
+# accuracy of model predictions against the testing data.
+gmv_ma3_accuracy <- forecast::accuracy(gmv_ma3_forecast, 
+                                         ts(portfolio_full$mv_port_return))
+gmv_ma1_accuracy <- forecast::accuracy(gmv_ma1_forecast, 
+                                         ts(portfolio_full$mv_port_return)) 
+gmv_ma0_accuracy <- forecast::accuracy(gmv_ma0_forecast,
+                                          ts(portfolio_full$mv_port_return)) 
+
+
+gmv_test_rmse <- c(round(gmv_ma3_accuracy[2,2], digits = 5),
+               round(gmv_ma1_accuracy[2,2], digits=5),
+               round(gmv_ma0_accuracy[2,2], digits=5))
+gmv_test_mae <- c(round(gmv_ma3_accuracy[2,3], digits=5),
+               round(gmv_ma1_accuracy[2,3], digits =5),
+               round(gmv_ma0_accuracy[2,3], digits=5))
+gmv_test_names <- c("MA(3)","MA(1)","MA(0)")
+
+gmv_tests <- cbind(gmv_test_names, gmv_test_rmse, gmv_test_mae) %>% 
+             as_data_frame()
+
+kable(
+  gmv_tests %>% rename("Model" = "gmv_test_names", 
+                         "RMSE" = "gmv_test_rmse",
+                         "MAE" = "gmv_test_mae"),
+  caption = "Model Testing Accuracy")
+```
+
+
+
+
+Sharpe portfolio:
+---
+```{r}
+a3 <- ggplot(portfolio, aes(x = date, y = sharpe_port_price)) + 
+  geom_line() + labs(y = 'Price',x = "Date") + theme_minimal()
+b3 <- ggplot(portfolio, aes(x = date, y = sharpe_port_return)) + 
+  geom_line() + labs(y = 'Return', x = "Date") + theme_minimal()
+gridExtra::grid.arrange(a3, b3, top = "Maximum Sharpe Ratio Portfolio")
+```
+
+stationary test:
+```{r}
+adf.test(portfolio$sharpe_port_return, alternative = "stationary")
+```
+
+ACF & PACF sharpe:
+```{r}
+acf(portfolio$sharpe_port_return, main = "")  
+pacf(portfolio$sharpe_port_return, main = "") 
+```
+
+Fitting models:
+```{r}
+sharpe_ma3 <- forecast::Arima(portfolio$sharpe_port_return,
+                              order = c(0,0,3), 
+                              method = "ML")
+#summary(sharpe_ma3)
+sharpe_ma1 <- forecast::Arima(portfolio$sharpe_port_return,
+                              order = c(0,0,1), 
+                              method = "ML")
+# summary(sharpe_ma1)
+sharpe_ar3 <- forecast::Arima(portfolio$sharpe_port_return,
+                              order = c(3,0,0), 
+                              method = "ML")
+# summary(sharpe_ar3)
+```
+
+checking model residuals:
+```{r}
+checkresiduals(sharpe_ma3, plot = F) # good 
+checkresiduals(sharpe_ma1, plot = F) # bad 
+checkresiduals(sharpe_ar3, plot = F) # good
+```
+
+forecasting models:
+```{r}
+sharpe_ma3_forecast <- forecast::forecast(sharpe_ma3, h=12) 
+sharpe_ar3_forecast <- forecast::forecast(sharpe_ar3, h=12) 
+
+par(mfrow = c(2,1))
+plot(sharpe_ma3_forecast, 
+     xlim = c(length(portfolio$sharpe_port_return)-36, 
+              length(portfolio$sharpe_port_return)+12))
+plot(sharpe_ar3_forecast, 
+     xlim = c(length(portfolio$sharpe_port_return)-36, 
+              length(portfolio$sharpe_port_return)+12))
+plot(ts(portfolio_full$sharpe_port_return), xlim = 
+       c(length(portfolio_full$sharpe_port_return)-48, 
+              length(portfolio_full$sharpe_port_return)),
+     main = "True Return Time Series", xlab="",ylab="")
+```
+
+model accuracy:
+```{r}
+# accuracy of model predictions against the testing data.
+sharpe_ma3_accuracy <- forecast::accuracy(sharpe_ma3_forecast, 
+                                         ts(portfolio_full$sharpe_port_return))
+sharpe_ar3_accuracy <- forecast::accuracy(gmv_ma1_forecast, 
+                                         ts(portfolio_full$sharpe_port_return)) 
+
+
+
+sharpe_test_rmse <- c(round(sharpe_ma3_accuracy[2,2], digits = 5),
+               round(sharpe_ar3_accuracy[2,2], digits=5))
+sharpe_test_mae <- c(round(sharpe_ma3_accuracy[2,3], digits=5),
+               round(sharpe_ar3_accuracy[2,3], digits =5))
+sharpe_test_names <- c("MA(3)","AR(3)")
+
+sharpe_tests <- cbind(sharpe_test_names, sharpe_test_rmse, sharpe_test_mae) %>% 
+             as_data_frame()
+
+kable(
+  sharpe_tests %>% rename("Model" = "sharpe_test_names", 
+                         "RMSE" = "sharpe_test_rmse",
+                         "MAE" = "sharpe_test_mae"),
+  caption = "Model Testing Accuracy")
+```
+
+
+
+
+
+
+
